@@ -12,8 +12,8 @@ or public institutions.
 
 ## Requesting permission
 
-Open a GitHub issue in this repository titled **"Commercial license request"**, or contact the repository owner
-through their GitHub profile. Describe who you are, how you plan to use sw-factory, and at what scale.
+Open a GitHub issue at [https://github.com/omegachyll/sw_factory_agents/issues](https://github.com/omegachyll/sw_factory_agents/issues) titled **"Commercial license request"**, or contact the repository owner
+through their GitHub profile ([@omegachyll](https://github.com/omegachyll)). Describe who you are, how you plan to use sw-factory, and at what scale.
 
 ## Terms of commercial permission
 

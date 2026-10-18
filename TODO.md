@@ -8,10 +8,10 @@ Build order: the factory grows alongside the first real project. Do a step by ha
 - [x] `factory init` creates `.factory/` (config, agents/, skills/, .gitignore)
 - [x] README + TODO
 - [x] License: PolyForm Noncommercial 1.0.0 + COMMERCIAL.md (commercial use by revocable written permission)
-- [ ] After the first push, add the GitHub repo URL to the LICENSE notice and COMMERCIAL.md
-- [ ] `git init` this project and push it to GitHub
+- [x] After the first push, add the GitHub repo URL to the LICENSE notice and COMMERCIAL.md
+- [x] `git init` this project and push it to GitHub (private: omegachyll/sw_factory_agents)
 - [ ] Tests for `repo.py` (slug parsing for SSH/HTTPS remotes, not-in-repo error) and `init`
-- [ ] Install `gh` (`brew install gh`) and run `gh auth login`
+- [x] Install `gh` (`brew install gh`) and run `gh auth login`
 
 ## M1 — Runtimes (Claude + Copilot)
 - [ ] Verify current Python APIs for `claude-agent-sdk` and the GitHub Copilot SDK (install and inspect; don't guess)
