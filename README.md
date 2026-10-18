@@ -58,6 +58,7 @@ cd my-app
 factory init                      # add .factory/ to an existing repo
 factory doctor [--runtime ...]    # check setup: git, gh login, a test prompt on each runtime
 factory status                    # issues/PRs by stage, agent maturity levels
+factory models [--runtime ...]    # models per runtime (with aliases) and which model each agent uses
 
 factory triage    <issue>
 factory spec      <issue>
@@ -71,6 +72,10 @@ factory stats [--agent ...]
 
 Options shared by every agent command: `--runtime claude|copilot`, `--model`, `--dry-run` (show what would be posted or
 pushed without doing it) and `--yes` (skip confirmation).
+
+Picking a model: `--model`/`-m` takes a full ID, an alias (`opus`, `sonnet`, `haiku`, `fable`) or `?` to choose from a
+numbered list, e.g. `factory triage 3 -m sonnet` or `factory new -m ?`. Unknown names are rejected before anything runs.
+Set a lasting choice per agent in `.factory/config.yaml` (`triage: {level: L0, model: sonnet}`); `-m` overrides it.
 
 Every command except `new` acts on the git repo containing the current directory. The GitHub repo is read from the
 `origin` remote.

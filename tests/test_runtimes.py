@@ -9,7 +9,7 @@ from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
 from sw_factory.runtimes import AgentSpec, RuntimeUnavailable, get_runtime
 from sw_factory.runtimes.claude import TOOLS, ClaudeRuntime
-from sw_factory.runtimes.copilot import ALLOWED_KINDS, CopilotRuntime
+from sw_factory.runtimes.copilot import ALLOWED_KINDS, CopilotRuntime, _short_error
 
 
 def spec(runtime: str, access: str = "read", **kw: Any) -> AgentSpec:
@@ -149,6 +149,9 @@ class FakeClient:
         self.session_kwargs = kwargs
         return self.session
 
+    async def list_models(self) -> list[Any]:  # stands in for copilot.client.ModelInfo (.id, .name)
+        return [SimpleNamespace(id="gpt-x", name="GPT X")]
+
 
 def usage_event(input_tokens: int, output_tokens: int) -> Any:
     from copilot.session_events import SessionEventType
@@ -200,3 +203,19 @@ async def test_copilot_exception_after_error_event_is_not_repeated(tmp_path: Pat
     client = FakeClient(FakeSession([error_event], Exception("Session error: Authorization error")))
     result = await CopilotRuntime(lambda cwd: client).run(spec("copilot"), "hi", tmp_path)
     assert result.error == "Authorization error"
+
+
+async def test_copilot_list_models(tmp_path: Path) -> None:
+    client = FakeClient(FakeSession([], None))
+    assert await CopilotRuntime(lambda cwd: client).list_models(tmp_path) == [("gpt-x", "GPT X")]
+
+    logged_out = FakeClient(FakeSession([], None), authenticated=False)
+    with pytest.raises(RuntimeUnavailable, match="no Copilot subscription"):
+        await CopilotRuntime(lambda cwd: logged_out).list_models(tmp_path)
+
+
+def test_copilot_short_error() -> None:
+    raw = ('JSON-RPC Error -32603: Request models.list failed with message: GenericFailure, {"kind":"http",'
+           '"status":403,"body":"unauthorized: not authorized to use this Copilot feature\\n","headers":[{"name":"x"}]}')
+    assert _short_error(Exception(raw)) == "HTTP 403: unauthorized: not authorized to use this Copilot feature"
+    assert _short_error(Exception("plain")) == "plain"

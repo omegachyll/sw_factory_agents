@@ -45,6 +45,12 @@ Build order: the factory grows alongside the first real project. Do a step by ha
 - [ ] Capture further corrections from real use as the project agent's first skills
 - [ ] Interview answers are single-line; consider multi-line input (e.g. open `$EDITOR`) for long answers
 
+## Model selection
+- [x] `-m` accepts aliases (`opus`, `sonnet`, `haiku`, `fable`), also in `config.yaml`
+- [x] `-m ?` picks from a numbered list; unknown models are rejected up front (unknown `claude-*` IDs warn but run)
+- [x] `factory models`: models per runtime (Copilot via the SDK's `list_models`) and each agent's runtime/model/level
+- [ ] Verify Copilot model listing and validation with a real subscription
+
 ## M3 — GitHub layer + run log
 - [x] `github.py`: `gh` wrapper for repos, labels, milestones and issues (done in M2)
 - [ ] `github.py`: comments, PRs, reviews, checks

@@ -12,8 +12,9 @@ from typing import Annotated, NoReturn, Optional
 import typer
 
 from sw_factory import __version__
-from sw_factory.config import ConfigError, FactoryConfig, load_agent
+from sw_factory.config import ConfigError, FactoryConfig, load_agent, load_config
 from sw_factory.github import GitHub, GitHubError
+from sw_factory.models import DEFAULT_MODELS, ModelChoice, ModelError, list_models, resolve_model
 from sw_factory.project import (
     Aborted,
     Milestone,
@@ -43,7 +44,11 @@ class Runtime(str, Enum):
 RuntimeOpt = Annotated[
     Optional[Runtime], typer.Option("--runtime", "-r", help="Agent SDK to run on (default: from .factory/config.yaml).")
 ]
-ModelOpt = Annotated[Optional[str], typer.Option("--model", "-m", help="Model override for this run.")]
+ModelOpt = Annotated[
+    Optional[str],
+    typer.Option("--model", "-m", help="Model for this run: an ID, an alias (opus, sonnet, haiku, fable), or '?' to "
+                                       "pick from a list. See `factory models`."),
+]
 DryRunOpt = Annotated[bool, typer.Option("--dry-run", help="Do the work but only show what would be posted/pushed.")]
 YesOpt = Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation before posting/pushing.")]
 
@@ -136,6 +141,46 @@ def _fail(message: str) -> NoReturn:
     raise typer.Exit(1)
 
 
+def _config(repo: RepoContext) -> FactoryConfig:
+    try:
+        return load_config(repo)
+    except ConfigError as e:
+        _fail(str(e))
+
+
+def _pick_model(runtime: str, models: list[ModelChoice]) -> str:
+    default = DEFAULT_MODELS.get(runtime)
+    typer.secho(f"{runtime} models:", bold=True)
+    for n, m in enumerate(models, 1):
+        aliases = f" ({', '.join(m.aliases)})" if m.aliases else ""
+        description = f"  {m.description}" if m.description else ""
+        typer.echo(f"  {n}. {m.id}{aliases}{description}{'  [default]' if m.id == default else ''}")
+    default_n = next((n for n, m in enumerate(models, 1) if m.id == default), 1)
+    choice = typer.prompt("Model number", default=str(default_n))
+    while not (choice.strip().isdigit() and 1 <= int(choice) <= len(models)):
+        choice = typer.prompt(f"{choice!r} is not a number from 1 to {len(models)}. Model number", default=str(default_n))
+    return models[int(choice) - 1].id
+
+
+def _choose_model(runtime: str, model: str | None, cwd: Path) -> str | None:
+    """Expand aliases, validate, or run the picker for `-m ?`. Exits with the valid choices on an unknown model."""
+    try:
+        resolved, warnings = asyncio.run(resolve_model(runtime, model, cwd, lambda ms: _pick_model(runtime, ms)))
+    except ModelError as e:
+        _fail(str(e))
+    for warning in warnings:
+        typer.secho(f"Warning: {warning}", fg="yellow", err=True)
+    return resolved
+
+
+def _model_for(
+    agent: str, runtime: Runtime | None, model: str | None, config: FactoryConfig, cwd: Path
+) -> tuple[str, str | None]:
+    """The runtime and model an agent will run on, after CLI options, config.yaml and the model checks."""
+    resolved_runtime, resolved_model = config.resolve(agent, runtime.value if runtime else None, model)
+    return resolved_runtime, _choose_model(resolved_runtime, resolved_model, cwd)
+
+
 def _show_plan(plan: ProjectPlan, plan_file: Path) -> None:
     typer.secho(f"\nPlan for {plan.repo_name} ({'private' if plan.private else 'public'})", bold=True)
     typer.echo(f"  {plan.description}")
@@ -209,7 +254,10 @@ def new(
 def _plan_interactively(
     idea: str | None, parent: Path, runtime: Runtime | None, model: str | None
 ) -> tuple[ProjectPlan, Path]:
-    spec = load_agent(None, "project", FactoryConfig(), runtime.value if runtime else None, model)
+    resolved_runtime, resolved_model = _model_for("project", runtime, model, FactoryConfig(), parent)
+    spec = load_agent(None, "project", FactoryConfig(), resolved_runtime, resolved_model)
+    if resolved_model:
+        typer.secho(f"Using {resolved_runtime} / {resolved_model}", dim=True)
     agent = get_runtime(spec.runtime)
     typer.secho("Project interview. Answer each question; type /done to wrap up early, /quit to stop.\n", dim=True)
 
@@ -295,10 +343,20 @@ def doctor(
 
     cwd = repo.root if repo else Path.cwd()
     for name in [runtime.value] if runtime else list(RUNTIMES):
-        spec = AgentSpec(name="doctor", system_prompt="You are a connectivity check.", runtime=name, model=model,
-                         access="read", timeout_s=180)
         # Copilot is optional (experimental) unless you explicitly ask to check it.
         optional = runtime is None and name == "copilot"
+        try:
+            resolved_model, warnings = asyncio.run(
+                resolve_model(name, model, cwd, lambda ms, name=name: _pick_model(name, ms))
+            )
+        except ModelError as e:
+            problems += not optional
+            report(None if optional else False, f"runtime {name}", str(e))
+            continue
+        for warning in warnings:
+            typer.secho(f"Warning: {warning}", fg="yellow")
+        spec = AgentSpec(name="doctor", system_prompt="You are a connectivity check.", runtime=name,
+                         model=resolved_model, access="read", timeout_s=180)
         try:
             result = asyncio.run(get_runtime(name).run(spec, DOCTOR_PROMPT, cwd))
         except RuntimeUnavailable as e:
@@ -322,6 +380,40 @@ def doctor(
 
 
 @app.command()
+def models(
+    runtime: Annotated[Optional[Runtime], typer.Option("--runtime", "-r", help="Only this runtime.")] = None,
+) -> None:
+    """List the models each runtime offers (with aliases) and which model each agent uses in this repo."""
+    try:
+        repo: RepoContext | None = find_repo()
+    except NotInRepoError:
+        repo = None
+    cwd = repo.root if repo else Path.cwd()
+
+    for name in [runtime.value] if runtime else list(RUNTIMES):
+        typer.secho(f"{name}", bold=True)
+        try:
+            available = asyncio.run(list_models(name, cwd))
+        except RuntimeUnavailable as e:
+            typer.secho(f"  unavailable: {e}", fg="yellow")
+            continue
+        default = DEFAULT_MODELS.get(name)
+        for m in available:
+            aliases = f"  ({', '.join(m.aliases)})" if m.aliases else ""
+            description = f"  {m.description}" if m.description else ""
+            typer.echo(f"  {m.id}{aliases}{description}{'  [default]' if m.id == default else ''}")
+
+    if repo and repo.has_factory:
+        config = _config(repo)
+        typer.secho(f"\nAgents in {repo.root.name} (.factory/config.yaml)", bold=True)
+        for agent, settings in config.agents.items():
+            agent_runtime, agent_model = config.resolve(agent)
+            shown = agent_model or f"default ({DEFAULT_MODELS.get(agent_runtime) or 'runtime picks'})"
+            typer.echo(f"  {agent:<10} {agent_runtime:<8} {shown:<40} {settings.level}")
+    typer.secho("\nPick per run with -m <id or alias>, or -m ? for a list.", dim=True)
+
+
+@app.command()
 def status() -> None:
     """Show issues/PRs by factory stage and each agent's maturity level."""
     _not_implemented("status", _repo())
@@ -335,7 +427,9 @@ def triage(
     issue: int, runtime: RuntimeOpt = None, model: ModelOpt = None, dry_run: DryRunOpt = False, yes: YesOpt = False
 ) -> None:
     """Classify an issue: ready to implement, needs a spec, or needs a human answer."""
-    _not_implemented("triage", _repo(), issue=issue, runtime=runtime, model=model, dry_run=dry_run, yes=yes)
+    repo = _repo()
+    runtime_name, model_id = _model_for("triage", runtime, model, _config(repo), repo.root)
+    _not_implemented("triage", repo, issue=issue, runtime=runtime_name, model=model_id, dry_run=dry_run, yes=yes)
 
 
 @app.command()
@@ -343,7 +437,9 @@ def spec(
     issue: int, runtime: RuntimeOpt = None, model: ModelOpt = None, dry_run: DryRunOpt = False, yes: YesOpt = False
 ) -> None:
     """Write a product spec + tech spec for an issue and open it as a PR for your review."""
-    _not_implemented("spec", _repo(), issue=issue, runtime=runtime, model=model, dry_run=dry_run, yes=yes)
+    repo = _repo()
+    runtime_name, model_id = _model_for("spec", runtime, model, _config(repo), repo.root)
+    _not_implemented("spec", repo, issue=issue, runtime=runtime_name, model=model_id, dry_run=dry_run, yes=yes)
 
 
 @app.command()
@@ -351,7 +447,9 @@ def implement(
     issue: int, runtime: RuntimeOpt = None, model: ModelOpt = None, dry_run: DryRunOpt = False, yes: YesOpt = False
 ) -> None:
     """Implement an issue in its own worktree on branch factory/<issue> and open a PR."""
-    _not_implemented("implement", _repo(), issue=issue, runtime=runtime, model=model, dry_run=dry_run, yes=yes)
+    repo = _repo()
+    runtime_name, model_id = _model_for("implement", runtime, model, _config(repo), repo.root)
+    _not_implemented("implement", repo, issue=issue, runtime=runtime_name, model=model_id, dry_run=dry_run, yes=yes)
 
 
 @app.command()
@@ -359,7 +457,9 @@ def fix(
     pr: int, runtime: RuntimeOpt = None, model: ModelOpt = None, dry_run: DryRunOpt = False, yes: YesOpt = False
 ) -> None:
     """Fix loop: read the review comments on a PR and push fixes."""
-    _not_implemented("fix", _repo(), pr=pr, runtime=runtime, model=model, dry_run=dry_run, yes=yes)
+    repo = _repo()
+    runtime_name, model_id = _model_for("fix", runtime, model, _config(repo), repo.root)
+    _not_implemented("fix", repo, pr=pr, runtime=runtime_name, model=model_id, dry_run=dry_run, yes=yes)
 
 
 @app.command()
@@ -367,7 +467,9 @@ def review(
     pr: int, runtime: RuntimeOpt = None, model: ModelOpt = None, dry_run: DryRunOpt = False, yes: YesOpt = False
 ) -> None:
     """Review a PR, post comments, and flag whether it needs human review."""
-    _not_implemented("review", _repo(), pr=pr, runtime=runtime, model=model, dry_run=dry_run, yes=yes)
+    repo = _repo()
+    runtime_name, model_id = _model_for("review", runtime, model, _config(repo), repo.root)
+    _not_implemented("review", repo, pr=pr, runtime=runtime_name, model=model_id, dry_run=dry_run, yes=yes)
 
 
 # --- Self-improvement & metrics -----------------------------------------------------------------------------
@@ -381,7 +483,9 @@ def learn(
     dry_run: DryRunOpt = False,
 ) -> None:
     """Learning loop: mine PR reviews/comments for recurring corrections and propose skill edits as a PR."""
-    _not_implemented("learn", _repo(), agent=agent, runtime=runtime, model=model, dry_run=dry_run)
+    repo = _repo()
+    runtime_name, model_id = _model_for("learn", runtime, model, _config(repo), repo.root)
+    _not_implemented("learn", repo, agent=agent, runtime=runtime_name, model=model_id, dry_run=dry_run)
 
 
 @app.command()
