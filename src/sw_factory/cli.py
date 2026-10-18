@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
+import shutil
+import subprocess
 from enum import Enum
+from pathlib import Path
 from typing import Annotated, Optional
 
 import typer
 
 from sw_factory import __version__
 from sw_factory.repo import FACTORY_DIR, NotInRepoError, RepoContext, find_repo
+from sw_factory.runtimes import RUNTIMES, AgentSpec, RuntimeUnavailable, get_runtime
 
 app = typer.Typer(
     help="Self-improving software factory: AI agents that work the GitHub issues of the repo you run it in.",
@@ -41,7 +46,7 @@ agents:
   spec:      {level: L0}
   implement: {level: L0}
   fix:       {level: L0}
-  review:    {level: L0, runtime: copilot}   # cross-model review: build on one SDK, review on the other
+  review:    {level: L0}   # switch to `runtime: copilot` for cross-model review once Copilot is verified
   learn:     {level: L0}
 
 worktrees_dir: ../{repo}.worktrees
@@ -114,6 +119,69 @@ def init(force: Annotated[bool, typer.Option(help="Overwrite an existing config.
     (fdir / ".gitignore").write_text(GITIGNORE_TEMPLATE)
     typer.secho(f"Initialized {fdir}", fg="green")
     typer.echo("TODO: copy default agent/skill templates and create factory labels on GitHub.")
+
+
+DOCTOR_PROMPT = "Reply with exactly the word OK and nothing else."
+
+
+@app.command()
+def doctor(
+    runtime: Annotated[
+        Optional[Runtime], typer.Option("--runtime", "-r", help="Check only this runtime (default: all).")
+    ] = None,
+    model: ModelOpt = None,
+) -> None:
+    """Check the setup: git repo, GitHub CLI login, and a tiny test prompt on each agent runtime."""
+    problems = 0
+
+    def report(ok: bool | None, label: str, detail: str) -> None:
+        mark, color = {True: ("ok  ", "green"), False: ("FAIL", "red"), None: ("skip", "yellow")}[ok]
+        typer.secho(f"[{mark}] ", fg=color, nl=False)
+        typer.echo(f"{label}: {detail}")
+
+    try:
+        repo: RepoContext | None = find_repo()
+        report(True, "git repo", f"{repo.root} ({repo.slug or 'no GitHub origin'})")
+    except NotInRepoError:
+        repo = None
+        report(None, "git repo", "not in a git repo (fine for `factory new`)")
+
+    gh = shutil.which("gh")
+    if gh is None:
+        problems += 1
+        report(False, "GitHub CLI", "gh not installed: brew install gh")
+    elif subprocess.run([gh, "auth", "status"], capture_output=True).returncode != 0:
+        problems += 1
+        report(False, "GitHub CLI", "not logged in: gh auth login")
+    else:
+        report(True, "GitHub CLI", "logged in")
+
+    cwd = repo.root if repo else Path.cwd()
+    for name in [runtime.value] if runtime else list(RUNTIMES):
+        spec = AgentSpec(name="doctor", system_prompt="You are a connectivity check.", runtime=name, model=model,
+                         access="read", timeout_s=180)
+        # Copilot is optional (experimental) unless you explicitly ask to check it.
+        optional = runtime is None and name == "copilot"
+        try:
+            result = asyncio.run(get_runtime(name).run(spec, DOCTOR_PROMPT, cwd))
+        except RuntimeUnavailable as e:
+            result, error = None, f"unavailable: {e}"
+        else:
+            error = None if result.ok else f"error: {result.error}"
+        if result is None or error:
+            problems += not optional
+            report(None if optional else False, f"runtime {name}", error or "no result")
+            continue
+        usage = []
+        if result.input_tokens is not None:
+            usage.append(f"{result.input_tokens} in / {result.output_tokens} out tokens")
+        if result.cost_usd is not None:
+            usage.append(f"${result.cost_usd:.4f}")
+        usage.append(f"{result.duration_s:.1f}s")
+        reply = result.text.strip().replace("\n", " ")[:60]
+        report(True, f"runtime {name}", f"{result.model or 'default model'} replied {reply!r} ({', '.join(usage)})")
+
+    raise typer.Exit(1 if problems else 0)
 
 
 @app.command()

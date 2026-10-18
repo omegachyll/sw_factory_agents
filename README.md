@@ -6,8 +6,9 @@ GitHub issues: triage, spec, implement, review and fix. They learn from your PR 
 Inspired by Zach Lloyd's talk [*Self-improving software factories*](https://youtu.be/tUPPVhBBcoM). The talk's idea is that
 software engineering becomes *factory engineering*: you build the thing that builds the product.
 
-> **Status: skeleton.** The CLI shell, repo detection and `factory init` work. The agent commands are stubs.
-> See [TODO.md](TODO.md).
+> **Status: early.** The CLI shell, `factory init`, `factory doctor` and the agent runtime layer work: agents can
+> run on the Claude Agent SDK, and on the Copilot SDK (experimental, see below). The agent commands themselves are
+> still stubs. See [TODO.md](TODO.md).
 
 ## How it works
 
@@ -25,7 +26,8 @@ GitHub issue ─► triage ─► spec (you review) ─► implement ─► revi
   PRs for recurring corrections and proposes edits to the agents' skill files. You approve those edits as a normal PR.
 - **Two agent runtimes.** Each agent can run on the **Claude Agent SDK** or the **GitHub Copilot SDK**. You can pick
   per agent in config or per run with `--runtime`. A useful setup is to build with one runtime and review with the
-  other.
+  other. **The Copilot runtime is experimental:** it's type-checked against the SDK and tested with a fake client,
+  but hasn't yet been run end to end against a real Copilot subscription.
 - **The factory lives in the product repo.** Agents, skills and config are stored in `.factory/` and versioned with the
   code, so every project ends up with a factory tuned to it.
 
@@ -34,11 +36,17 @@ GitHub issue ─► triage ─► spec (you review) ─► implement ─► revi
 Requires Python 3.11+, [uv](https://docs.astral.sh/uv/), git and the [GitHub CLI](https://cli.github.com/) (`gh auth login`).
 
 ```bash
-uv tool install -e /path/to/sw_factory_agents   # puts `factory` on your PATH
-factory --help
+uv tool install -e /path/to/sw_factory_agents                # puts `factory` on your PATH (Claude runtime)
+uv tool install -e '/path/to/sw_factory_agents[copilot]'     # ...plus the experimental Copilot runtime
+factory doctor                                               # check git, gh login, and each runtime
 ```
 
-For development: `uv run factory --help` from this directory.
+- **Claude runtime:** uses your Claude Code login, or `ANTHROPIC_API_KEY`.
+- **Copilot runtime:** needs a GitHub Copilot subscription. The Copilot CLI downloads itself on first use.
+
+Reinstall with `--force` after changing `pyproject.toml`.
+
+For development: `uv sync --all-extras`, then `uv run pytest` and `uv run pyright`.
 
 ## Usage
 
@@ -46,6 +54,7 @@ For development: `uv run factory --help` from this directory.
 factory new                       # project agent: interview → new repo + GitHub repo → .factory/ → starting issues
 cd my-app
 factory init                      # add .factory/ to an existing repo
+factory doctor [--runtime ...]    # check setup: git, gh login, a test prompt on each runtime
 factory status                    # issues/PRs by stage, agent maturity levels
 
 factory triage    <issue>
@@ -70,7 +79,7 @@ Every command except `new` acts on the git repo containing the current directory
 my-app/
   .factory/
     config.yaml        # default runtime/model, per-agent overrides + maturity level
-    agents/<agent>.md  # role prompt + frontmatter (runtime, model, tools)
+    agents/<agent>.md  # role prompt + frontmatter `access: read|write`
     skills/<agent>/    # skill/context files, edited over time by `factory learn`
     runs.db            # gitignored: run log + collected feedback
 ../my-app.worktrees/   # one checkout per issue the agents work in
@@ -104,8 +113,14 @@ one PR.
 
 ```
 src/sw_factory/
-  cli.py     # Typer app and commands
-  repo.py    # find the repo root + GitHub owner/name from the working directory
+  cli.py       # Typer app and commands
+  repo.py      # find the repo root + GitHub owner/name from the working directory
+  config.py    # load .factory/config.yaml + agents/<name>.md into an AgentSpec
+  runtimes/
+    base.py    # AgentSpec / AgentResult / AgentRuntime: the runtime-neutral interface
+    claude.py  # Claude Agent SDK adapter
+    copilot.py # GitHub Copilot SDK adapter (experimental)
+tests/         # pytest; SDK adapters tested against stand-ins built from the SDKs' real types
 ```
 
 ## License

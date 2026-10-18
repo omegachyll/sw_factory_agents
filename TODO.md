@@ -10,16 +10,24 @@ Build order: the factory grows alongside the first real project. Do a step by ha
 - [x] License: PolyForm Noncommercial 1.0.0 + COMMERCIAL.md (commercial use by revocable written permission)
 - [x] After the first push, add the GitHub repo URL to the LICENSE notice and COMMERCIAL.md
 - [x] `git init` this project and push it to GitHub (private: omegachyll/sw_factory_agents)
-- [ ] Tests for `repo.py` (slug parsing for SSH/HTTPS remotes, not-in-repo error) and `init`
+- [x] Tests for `repo.py` (slug parsing for SSH/HTTPS remotes, not-in-repo error) and `init`
 - [x] Install `gh` (`brew install gh`) and run `gh auth login`
 
 ## M1 — Runtimes (Claude + Copilot)
-- [ ] Verify current Python APIs for `claude-agent-sdk` and the GitHub Copilot SDK (install and inspect; don't guess)
-- [ ] `runtimes/base.py`: `AgentRuntime` interface → `AgentResult(text, usage, cost, duration)`
-- [ ] `runtimes/claude.py` adapter (system prompt, allowed tools, `cwd`, permission mode)
-- [ ] `runtimes/copilot.py` adapter (session with system message, tools, working dir)
-- [ ] Load `.factory/config.yaml` and `agents/<agent>.md` (frontmatter + prompt); resolve runtime/model overrides
-- [ ] Smoke command: run a trivial prompt on both runtimes
+- [x] Verify current Python APIs for `claude-agent-sdk` (0.2.168) and `github-copilot-sdk` (1.0.22) by installing and inspecting
+- [x] `runtimes/base.py`: `AgentSpec` (prompt, runtime, model, access read|write, timeout) → `AgentResult`
+- [x] `runtimes/claude.py`: tools limited by access level, `dontAsk` permissions, no user settings or MCP connectors
+- [x] `runtimes/copilot.py`: **experimental.** Type-checked against the SDK and tested with a fake client. Live: it
+      reaches GitHub and gets an authorization error (no subscription), reported cleanly
+- [ ] Check whether Copilot's bring-your-own-key mode (`provider={"type": "anthropic", "api_key": ...}`) works
+      without a Copilot subscription. Needs an `ANTHROPIC_API_KEY`
+- [ ] When Copilot can be run for real: check it doesn't load the user's own MCP servers/config (see the Claude finding below)
+- [x] Default `review` runtime to `claude` in the `init` config until Copilot is verified end to end
+- [x] Load `.factory/config.yaml` (runtime/model/level per agent) and `agents/<agent>.md` (frontmatter `access` + prompt).
+      Precedence: CLI option > `agents.<name>` > defaults
+- [x] Smoke command: `factory doctor` checks git, `gh` login, and sends a test prompt to each runtime
+- [x] Finding: without `strict_mcp_config`, Claude runs loaded every claude.ai connector (~196K tokens, $1.57 for "OK").
+      Fixed: ~3.4K tokens, ~$0.001 cached
 
 ## M2 — Project agent (`factory new`)
 - [ ] Interview flow in the terminal (vision, users, core features, stack, non-goals); checklist decides when it's done
