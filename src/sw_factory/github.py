@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -13,6 +13,7 @@ FACTORY_LABELS: list[tuple[str, str, str]] = [
     ("factory:new", "ededed", "New issue, waiting for triage"),
     ("factory:needs-spec", "fbca04", "Needs a product/tech spec before implementation"),
     ("factory:spec-review", "f9d0c4", "Spec written, waiting for human review"),
+    ("factory:blocked", "c5def5", "Waiting on another issue to be closed first"),
     ("factory:ready", "0e8a16", "Ready to implement"),
     ("factory:in-progress", "1d76db", "An agent is implementing this"),
     ("factory:in-review", "5319e7", "PR open, in review"),
@@ -26,6 +27,25 @@ ISSUE_LABELS = {"enhancement", "bug", "documentation", "epic"}
 
 class GitHubError(Exception):
     pass
+
+
+@dataclass
+class Comment:
+    id: int
+    author: str
+    body: str
+    created_at: str
+
+
+@dataclass
+class IssueData:
+    number: int
+    title: str
+    body: str
+    state: str  # "open" | "closed"
+    labels: list[str]
+    is_pull_request: bool = False
+    comments: list[Comment] = field(default_factory=list)
 
 
 Runner = Callable[[Sequence[str], Path | None], str]
@@ -80,3 +100,40 @@ class GitHub:
             return True
         except GitHubError:
             return False
+
+    def issue(self, slug: str, number: int, with_comments: bool = True) -> IssueData:
+        data = json.loads(self.runner(["api", f"repos/{slug}/issues/{number}"], None))
+        issue = IssueData(
+            number=data["number"], title=data["title"], body=data.get("body") or "", state=data["state"],
+            labels=[label["name"] for label in data.get("labels", [])], is_pull_request="pull_request" in data,
+        )
+        if with_comments:
+            lines = self.runner(
+                ["api", "--paginate", f"repos/{slug}/issues/{number}/comments",
+                 "--jq", ".[] | {id, author: .user.login, body, created_at}"], None
+            )
+            issue.comments = [Comment(**json.loads(line)) for line in lines.splitlines() if line.strip()]
+        return issue
+
+    def comment(self, slug: str, number: int, body: str) -> str:
+        """Post a comment on an issue or PR and return its URL."""
+        return self.runner(
+            ["api", f"repos/{slug}/issues/{number}/comments", "-f", f"body={body}", "--jq", ".html_url"], None
+        )
+
+    def edit_comment(self, slug: str, comment_id: int, body: str) -> str:
+        return self.runner(
+            ["api", "-X", "PATCH", f"repos/{slug}/issues/comments/{comment_id}", "-f", f"body={body}",
+             "--jq", ".html_url"], None
+        )
+
+    def set_stage(self, slug: str, number: int, stage: str, current_labels: list[str]) -> None:
+        """Move an issue to a factory stage: add that label and remove any other `factory:` stage label."""
+        known = {name: (color, description) for name, color, description in FACTORY_LABELS}
+        if stage in known:  # the repo may predate this label
+            self.ensure_labels(slug, [(stage, *known[stage])])
+        args = ["issue", "edit", str(number), "-R", slug, "--add-label", stage]
+        for label in current_labels:
+            if label.startswith("factory:") and label != stage:
+                args += ["--remove-label", label]
+        self.runner(args, None)

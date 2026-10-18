@@ -73,23 +73,23 @@ def factory_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def test_cli_picker_reprompts_until_valid(factory_repo: Path) -> None:
-    result = CliRunner().invoke(app, ["triage", "1", "-r", "claude", "-m", "?"], input="x\n9\n2\n")
+    result = CliRunner().invoke(app, ["implement", "1", "-r", "claude", "-m", "?"], input="x\n9\n2\n")
     assert "1. claude-opus-5-5 (opus)" in result.output and "[default]" in result.output
     assert result.output.count("is not a number from 1 to 4") == 2
     assert "model: claude-sonnet-5-5" in result.output  # resolved model reaches the command
 
 
 def test_cli_alias_and_unknown_model(factory_repo: Path) -> None:
-    result = CliRunner().invoke(app, ["triage", "1", "-r", "claude", "-m", "haiku"])
+    result = CliRunner().invoke(app, ["implement", "1", "-r", "claude", "-m", "haiku"])
     assert "model: claude-haiku-4-5-20251001" in result.output
-    bad = CliRunner().invoke(app, ["triage", "1", "-r", "claude", "-m", "gpt-9"])
+    bad = CliRunner().invoke(app, ["implement", "1", "-r", "claude", "-m", "gpt-9"])
     assert bad.exit_code == 1 and "unknown Claude model 'gpt-9'" in bad.output
 
 
 def test_cli_alias_in_config(factory_repo: Path) -> None:
     config = factory_repo / ".factory" / "config.yaml"
-    config.write_text(config.read_text().replace("triage:    {level: L0}", "triage:    {level: L0, model: sonnet}"))
-    result = CliRunner().invoke(app, ["triage", "1"])
+    config.write_text(config.read_text().replace("implement: {level: L0}", "implement: {level: L0, model: sonnet}"))
+    result = CliRunner().invoke(app, ["implement", "1"])
     assert "model: claude-sonnet-5-5" in result.output
 
 

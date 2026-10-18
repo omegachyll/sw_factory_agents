@@ -6,9 +6,9 @@ GitHub issues: triage, spec, implement, review and fix. They learn from your PR 
 Inspired by Zach Lloyd's talk [*Self-improving software factories*](https://youtu.be/tUPPVhBBcoM). The talk's idea is that
 software engineering becomes *factory engineering*: you build the thing that builds the product.
 
-> **Status: early.** `factory new` (the project agent), `factory init` and `factory doctor` work, and agents run on
-> the Claude Agent SDK and, experimentally, the Copilot SDK. The build-loop agents (`triage`, `spec`, `implement`,
-> `review`, `fix`) and `learn`/`stats` are still stubs. See [TODO.md](TODO.md).
+> **Status: early.** `factory new` (the project agent), `factory triage`, `factory init`, `factory models` and
+> `factory doctor` work, and agents run on the Claude Agent SDK and, experimentally, the Copilot SDK. The other
+> build-loop agents (`spec`, `implement`, `review`, `fix`) and `learn`/`stats` are still stubs. See [TODO.md](TODO.md).
 
 ## How it works
 
@@ -60,7 +60,7 @@ factory doctor [--runtime ...]    # check setup: git, gh login, a test prompt on
 factory status                    # issues/PRs by stage, agent maturity levels
 factory models [--runtime ...]    # models per runtime (with aliases) and which model each agent uses
 
-factory triage    <issue>
+factory triage    <issue>         # ready (with a build plan) / needs-human / needs-spec / blocked, as an issue comment
 factory spec      <issue>
 factory implement <issue>         # worktree + branch factory/<issue>, opens a PR
 factory review    <pr>
@@ -79,6 +79,17 @@ Set a lasting choice per agent in `.factory/config.yaml` (`triage: {level: L0, m
 
 Every command except `new` acts on the git repo containing the current directory. The GitHub repo is read from the
 `origin` remote.
+
+### Triage: `factory triage <issue>`
+
+Decides whether an issue can be built now and, if so, writes the build plan the implement agent will follow:
+approach, files, steps, tests, how each acceptance criterion is met, and assumptions. The agent reads the issue, its
+comments, PRODUCT.md/TECH.md and the repository (read-only).
+
+- Issues whose `Depends on: #N` issues are still open are marked `factory:blocked` without calling a model.
+- You see the comment first; it's posted (and the stage label set) only when you confirm. `--dry-run` posts nothing.
+- To correct it, reply on the issue and run triage again. It reads your reply, revises, and edits its own comment
+  in place, or posts a new one if there are replies after it.
 
 ### Starting a project: `factory new`
 

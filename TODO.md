@@ -53,17 +53,21 @@ Build order: the factory grows alongside the first real project. Do a step by ha
 
 ## M3 — GitHub layer + run log
 - [x] `github.py`: `gh` wrapper for repos, labels, milestones and issues (done in M2)
-- [ ] `github.py`: comments, PRs, reviews, checks
+- [x] `github.py`: read issues with comments, post/edit comments, set the stage label
+- [ ] `github.py`: PRs, reviews, checks
 - [ ] `store.py`: SQLite `runs.db` (runs, feedback)
-- [ ] Hidden footer on everything agents post: `<!-- factory: agent=… run=… factory=<sha> project-skills=<sha> -->`
-- [ ] Record the factory version (git SHA of sw-factory) for each run, so shared-layer regressions show up across projects
-- [ ] `--dry-run` / confirmation prompt before any post or push (maturity L0/L1)
+- [x] Hidden footer on agent comments: `<!-- factory: agent=… run=… factory=<sha> model=… -->` (`footer.py`)
+- [ ] Add `project-skills=<sha>` to the footer
+- [x] Record the factory version (git SHA of sw-factory) for each run, so shared-layer regressions show up across projects
+- [x] `--dry-run` / confirmation prompt before any post (triage); keep it for every agent that posts or pushes
 
 ## M4 — Build loop agents
 - [ ] `implement`: worktree in `../<repo>.worktrees/<issue>`, branch `factory/<issue>`, run tests, open PR "Closes #n"
 - [ ] `fix`: read review comments on the PR, push fixes
 - [ ] `review`: review diff, post comments, risk flag for human review (default runtime: the other SDK)
-- [ ] `triage`: ready / needs-spec / needs-human + labels
+- [x] `triage`: ready (with build plan) / needs-human / needs-spec / blocked + stage label, as an issue comment;
+      re-run reads replies and revises; live dry run on hydro-monitor #1 (Opus, $0.19, good plan) and #2 (blocked)
+- [ ] `triage`: use it for real on hydro-monitor; capture corrections as triage skills
 - [ ] `spec`: product + tech spec as a PR to `specs/<issue>.md`
 - [ ] `status`: issues/PRs by stage, maturity level per agent
 

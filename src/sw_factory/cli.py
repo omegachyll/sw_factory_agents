@@ -13,6 +13,7 @@ import typer
 
 from sw_factory import __version__
 from sw_factory.config import ConfigError, FactoryConfig, load_agent, load_config
+from sw_factory.footer import factory_version, make_footer, new_run_id
 from sw_factory.github import GitHub, GitHubError
 from sw_factory.models import DEFAULT_MODELS, ModelChoice, ModelError, list_models, resolve_model
 from sw_factory.project import (
@@ -27,7 +28,17 @@ from sw_factory.project import (
     save_plan,
 )
 from sw_factory.repo import FACTORY_DIR, NotInRepoError, RepoContext, find_repo
-from sw_factory.runtimes import RUNTIMES, AgentSpec, RuntimeUnavailable, get_runtime
+from sw_factory.runtimes import RUNTIMES, AgentResult, AgentSpec, RuntimeUnavailable, get_runtime
+from sw_factory.triage import (
+    STAGES,
+    TriageError,
+    TriageResult,
+    dependencies,
+    open_dependencies,
+    publish,
+    render_comment,
+    triage_issue,
+)
 
 app = typer.Typer(
     help="Self-improving software factory: AI agents that work the GitHub issues of the repo you run it in.",
@@ -426,10 +437,68 @@ def status() -> None:
 def triage(
     issue: int, runtime: RuntimeOpt = None, model: ModelOpt = None, dry_run: DryRunOpt = False, yes: YesOpt = False
 ) -> None:
-    """Classify an issue: ready to implement, needs a spec, or needs a human answer."""
+    """Decide whether an issue can be built now and write its build plan, posted as an issue comment."""
     repo = _repo()
-    runtime_name, model_id = _model_for("triage", runtime, model, _config(repo), repo.root)
-    _not_implemented("triage", repo, issue=issue, runtime=runtime_name, model=model_id, dry_run=dry_run, yes=yes)
+    if not repo.slug:
+        _fail("this repo has no GitHub origin remote")
+    github = GitHub()
+    try:
+        data = github.issue(repo.slug, issue)
+        if data.is_pull_request:
+            _fail(f"#{issue} is a pull request, not an issue")
+        if data.state != "open":
+            _fail(f"#{issue} is {data.state}")
+        blockers = open_dependencies(github, repo.slug, data)
+    except GitHubError as e:
+        _fail(str(e))
+    typer.secho(f"#{issue} {data.title}", bold=True)
+
+    model_id: str | None = None
+    if blockers:  # no need to spend a run: it can't start yet
+        waiting = ", ".join(f"#{n}" for n in blockers)
+        result = TriageResult("blocked", f"Waiting on {waiting}. Re-run triage once "
+                                         f"{'it is' if len(blockers) == 1 else 'they are'} closed.")
+    else:
+        runtime_name, model_id = _model_for("triage", runtime, model, _config(repo), repo.root)
+        spec = load_agent(repo, "triage", _config(repo), runtime_name, model_id)
+        model_id = model_id or DEFAULT_MODELS.get(runtime_name)
+        typer.secho(f"Triaging with {runtime_name}{f' / {model_id}' if model_id else ''}...", dim=True)
+        closed = [n for n in dependencies(data.body) if n not in blockers]
+        try:
+            result, runs = asyncio.run(triage_issue(get_runtime(spec.runtime), spec, repo.root, data, closed))
+        except TriageError as e:
+            _fail(str(e))
+        except RuntimeUnavailable as e:
+            _fail(f"runtime unavailable: {e}")
+        typer.secho(_usage(runs), dim=True)
+
+    footer = make_footer(agent="triage", run=new_run_id(), factory=factory_version(), model=model_id)
+    body = render_comment(result, issue, model_id, footer)
+    stage = STAGES[result.decision]
+    typer.echo(f"\n{body.removesuffix(footer).rstrip()}\n")  # the footer is hidden on GitHub too
+    action = f"post this on #{issue} and set {stage}"
+    if dry_run:
+        typer.secho(f"[dry-run] would {action}", fg="yellow")
+        return
+    if not yes and not typer.confirm(f"{action[0].upper()}{action[1:]}?", default=True):
+        typer.echo("Not posted.")
+        raise typer.Exit(1)
+    try:
+        url, edited = publish(github, repo.slug, data, body, stage)
+    except GitHubError as e:
+        _fail(str(e))
+    typer.secho(f"{'Updated' if edited else 'Posted'} {url}", fg="green")
+
+
+def _usage(runs: list[AgentResult]) -> str:
+    tokens_in = sum(r.input_tokens or 0 for r in runs)
+    tokens_out = sum(r.output_tokens or 0 for r in runs)
+    costs = [r.cost_usd for r in runs if r.cost_usd is not None]
+    parts = [f"{tokens_in} in / {tokens_out} out tokens"]
+    if costs:
+        parts.append(f"${sum(costs):.4f}")
+    parts.append(f"{sum(r.duration_s for r in runs):.0f}s")
+    return ", ".join(parts) + (f" ({len(runs)} runs)" if len(runs) > 1 else "")
 
 
 @app.command()
