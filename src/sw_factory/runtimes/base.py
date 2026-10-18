@@ -6,8 +6,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
 
-# "read": may read files and search the repo. "write": may also edit files and run shell commands.
-Access = Literal["read", "write"]
+# "none": conversation only, no tools. "read": may read files and search the repo.
+# "write": may also edit files and run shell commands.
+Access = Literal["none", "read", "write"]
 
 DEFAULT_TIMEOUT_S = 30 * 60
 

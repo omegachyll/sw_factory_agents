@@ -16,6 +16,7 @@ INSTALL_HINT = "install the extra: uv tool install -e '.[copilot]' (or uv sync -
 
 # Permission request kinds each access level may approve; everything else (MCP, URLs, memory, ...) is rejected.
 ALLOWED_KINDS: dict[str, set[str]] = {
+    "none": set(),
     "read": {"read"},
     "write": {"read", "write", "shell"},
 }

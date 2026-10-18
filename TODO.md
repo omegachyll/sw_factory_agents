@@ -29,18 +29,28 @@ Build order: the factory grows alongside the first real project. Do a step by ha
 - [x] Finding: without `strict_mcp_config`, Claude runs loaded every claude.ai connector (~196K tokens, $1.57 for "OK").
       Fixed: ~3.4K tokens, ~$0.001 cached
 
-## M2 — Project agent (`factory new`)
-- [ ] Interview flow in the terminal (vision, users, core features, stack, non-goals); checklist decides when it's done
-- [ ] Write `PRODUCT.md` + `TECH.md`
-- [ ] Propose a backlog (epics → issues with acceptance criteria); you edit/approve before anything is created
-- [ ] Create folder + `git init` + `gh repo create`, run `init`, push scaffold
-- [ ] Create factory labels and milestones, open the issues
-- [ ] Use it on the real project; capture corrections as the project agent's first skills
+## M2 — Two-layer agents + project agent (`factory new`)
+- [x] Two layers: base agents + general skills ship in the factory (`src/sw_factory/prompts/`); projects add
+      `.factory/skills/<agent>/` (applied last, takes precedence) and may override a base prompt in `.factory/agents/`
+- [x] `factory init` creates only the project layer (config, skills/README) and creates the factory labels on GitHub
+- [x] `access: none` for conversation-only agents (no tools)
+- [x] Interview in the terminal driven by a checklist skill; `/done` wraps up, `/quit` aborts
+- [x] Plan: PRODUCT.md + TECH.md + backlog (milestones, issues with acceptance criteria) as validated JSON, one retry on bad output
+- [x] Review loop: create / revise with feedback / quit; plan saved to `<repo>.plan.json`, resumable with `--from-plan`
+- [x] Create: folder + README/PRODUCT/TECH + `.factory/`, first commit, `gh repo create` + push, labels, milestones, issues
+      (`factory:new` + allowed labels, hidden footer); checks the repo name is free first; `--dry-run` creates nothing
+- [x] Live dry-run on Claude with a sample project (habit tracker): good interview and a 6-issue backlog
+- [x] Used for real on hydro-monitor: 14 issues, 4 milestones, labels; all created as planned
+- [x] `Depends on: <title>` lines become `#N` issue links; issues needing a decision get `factory:needs-human`
+- [ ] Capture further corrections from real use as the project agent's first skills
+- [ ] Interview answers are single-line; consider multi-line input (e.g. open `$EDITOR`) for long answers
 
 ## M3 — GitHub layer + run log
-- [ ] `github.py`: thin `gh` wrappers (issues, comments, labels, PRs, reviews, checks)
+- [x] `github.py`: `gh` wrapper for repos, labels, milestones and issues (done in M2)
+- [ ] `github.py`: comments, PRs, reviews, checks
 - [ ] `store.py`: SQLite `runs.db` (runs, feedback)
-- [ ] Hidden footer on everything agents post: `<!-- factory: agent=… run=… skills=<sha> -->`
+- [ ] Hidden footer on everything agents post: `<!-- factory: agent=… run=… factory=<sha> project-skills=<sha> -->`
+- [ ] Record the factory version (git SHA of sw-factory) for each run, so shared-layer regressions show up across projects
 - [ ] `--dry-run` / confirmation prompt before any post or push (maturity L0/L1)
 
 ## M4 — Build loop agents
@@ -54,7 +64,8 @@ Build order: the factory grows alongside the first real project. Do a step by ha
 ## M5 — Self-improvement + metrics
 - [ ] Collect feedback: review comments, review state, commits you pushed on top, closed-unmerged PRs, spec edits
 - [ ] Treat `rule:`-prefixed comments as general lessons
-- [ ] `learn`: group recurring corrections per agent → propose skill edits as a PR
+- [ ] `learn`: group recurring corrections per agent and sort them into general (PR on sw-factory) vs
+      project-specific (PR on `.factory/skills/`); `rule:` = general, `rule(project):` = project
 - [ ] `stats`: correction rate, merged-without-changes %, tokens/cost per run, per skill version
 - [ ] Rules for moving an agent up the maturity ladder, based on stats
 

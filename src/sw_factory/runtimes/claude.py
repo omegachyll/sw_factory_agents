@@ -14,6 +14,7 @@ DEFAULT_MODEL = "claude-opus-5-5"
 # Tools are both the only ones available and pre-approved; permission_mode="dontAsk" denies anything else,
 # so a headless run never stalls waiting for a permission prompt.
 TOOLS: dict[Access, list[str]] = {
+    "none": [],
     "read": ["Read", "Glob", "Grep"],
     "write": ["Read", "Glob", "Grep", "Write", "Edit", "Bash"],
 }

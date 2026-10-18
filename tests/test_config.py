@@ -57,21 +57,72 @@ def test_parse_agent_file() -> None:
     assert parse_agent_file("Just a prompt.", "x.md") == ({}, "Just a prompt.")
 
 
-def test_init_then_load_agent(repo_dir: Path) -> None:
+@pytest.fixture
+def factory_prompts(tmp_path: Path) -> Path:
+    root = tmp_path / "factory-prompts"
+    (root / "agents").mkdir(parents=True)
+    (root / "agents" / "implement.md").write_text("---\naccess: write\n---\nYou implement issues.\n")
+    (root / "skills" / "implement").mkdir(parents=True)
+    (root / "skills" / "implement" / "b-testing.md").write_text("Run the tests.")
+    (root / "skills" / "implement" / "a-git.md").write_text("Small commits.")
+    return root
+
+
+def test_init_creates_project_layer_only(repo_dir: Path) -> None:
     result = CliRunner().invoke(app, ["init"])
     assert result.exit_code == 0, result.output
-    assert (repo_dir / ".factory" / ".gitignore").read_text().strip() == "runs.db"
-
-    repo = find_repo()
-    (repo.factory_dir / "agents" / "implement.md").write_text("---\naccess: write\n---\nImplement the issue.\n")
-    spec = load_agent(repo, "implement", load_config(repo), runtime="copilot")
-    assert (spec.runtime, spec.access, spec.system_prompt) == ("copilot", "write", "Implement the issue.")
-
-    with pytest.raises(ConfigError, match="no agent definition"):
-        load_agent(repo, "triage", load_config(repo))
+    fdir = repo_dir / ".factory"
+    assert (fdir / ".gitignore").read_text().strip() == "runs.db"
+    assert (fdir / "skills" / "README.md").exists()
+    assert not (fdir / "agents").exists()  # base agents live in the factory, not copied per project
 
     again = CliRunner().invoke(app, ["init"])
     assert again.exit_code == 1  # refuses to overwrite without --force
+
+
+def test_load_agent_layers_factory_and_project_skills(repo_dir: Path, factory_prompts: Path) -> None:
+    CliRunner().invoke(app, ["init"])
+    repo = find_repo()
+    project_skills = repo.factory_dir / "skills" / "implement"
+    project_skills.mkdir(parents=True)
+    (project_skills / "conventions.md").write_text("Use pnpm.")
+
+    spec = load_agent(repo, "implement", load_config(repo), runtime="copilot", factory_prompts=factory_prompts)
+
+    assert (spec.runtime, spec.access) == ("copilot", "write")
+    prompt = spec.system_prompt
+    # Base prompt, then factory skills in file order, then project skills last so they take precedence.
+    order = [prompt.index(s) for s in ("You implement issues.", "## a-git", "## b-testing", "Project-specific", "Use pnpm.")]
+    assert order == sorted(order)
+
+
+def test_project_can_override_base_prompt(repo_dir: Path, factory_prompts: Path) -> None:
+    CliRunner().invoke(app, ["init"])
+    repo = find_repo()
+    (repo.factory_dir / "agents").mkdir()
+    (repo.factory_dir / "agents" / "implement.md").write_text("---\naccess: read\n---\nCustom base.\n")
+
+    spec = load_agent(repo, "implement", load_config(repo), factory_prompts=factory_prompts)
+    assert spec.access == "read"
+    assert spec.system_prompt.startswith("Custom base.")
+    assert "Small commits." in spec.system_prompt  # factory skills still apply
+
+
+def test_load_agent_without_repo_and_unknown_agent(factory_prompts: Path) -> None:
+    from sw_factory.config import FactoryConfig
+
+    spec = load_agent(None, "implement", FactoryConfig(), factory_prompts=factory_prompts)
+    assert "Project-specific" not in spec.system_prompt
+    with pytest.raises(ConfigError, match="unknown agent"):
+        load_agent(None, "triage", FactoryConfig(), factory_prompts=factory_prompts)
+
+
+def test_shipped_project_agent_loads() -> None:
+    from sw_factory.config import FactoryConfig
+
+    spec = load_agent(None, "project", FactoryConfig())
+    assert spec.access == "none"
+    assert "## interview" in spec.system_prompt and "## backlog" in spec.system_prompt
 
 
 def test_agent_commands_require_init(repo_dir: Path) -> None:

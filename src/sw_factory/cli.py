@@ -7,11 +7,24 @@ import shutil
 import subprocess
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated, NoReturn, Optional
 
 import typer
 
 from sw_factory import __version__
+from sw_factory.config import ConfigError, FactoryConfig, load_agent
+from sw_factory.github import GitHub, GitHubError
+from sw_factory.project import (
+    Aborted,
+    Milestone,
+    ProjectError,
+    ProjectPlan,
+    create_project,
+    interview,
+    load_plan,
+    make_plan,
+    save_plan,
+)
 from sw_factory.repo import FACTORY_DIR, NotInRepoError, RepoContext, find_repo
 from sw_factory.runtimes import RUNTIMES, AgentSpec, RuntimeUnavailable, get_runtime
 
@@ -97,28 +110,152 @@ def _not_implemented(command: str, repo: RepoContext | None = None, **details: o
 
 # --- Setup --------------------------------------------------------------------------------------------------
 
+SKILLS_README = """\
+# Project-specific skills
+
+Lessons that apply only to this project, one folder per agent: `skills/<agent>/<topic>.md`.
+They are added after the factory's shared skills for that agent and take precedence over them.
+
+General lessons that would help every project belong in the factory (sw-factory's `prompts/skills/`) instead.
+To replace an agent's base prompt for this project only, add `.factory/agents/<agent>.md`.
+"""
+
+
+def write_factory_dir(root: Path) -> Path:
+    """Create .factory/ in a repo root: project config and a place for project-specific skills."""
+    fdir = root / FACTORY_DIR
+    (fdir / "skills").mkdir(parents=True, exist_ok=True)
+    (fdir / "config.yaml").write_text(CONFIG_TEMPLATE)
+    (fdir / ".gitignore").write_text(GITIGNORE_TEMPLATE)
+    (fdir / "skills" / "README.md").write_text(SKILLS_README)
+    return fdir
+
+
+def _fail(message: str) -> NoReturn:
+    typer.secho(f"Error: {message}", fg="red", err=True)
+    raise typer.Exit(1)
+
+
+def _show_plan(plan: ProjectPlan, plan_file: Path) -> None:
+    typer.secho(f"\nPlan for {plan.repo_name} ({'private' if plan.private else 'public'})", bold=True)
+    typer.echo(f"  {plan.description}")
+    typer.echo(f"  PRODUCT.md: {len(plan.product_md.splitlines())} lines, TECH.md: {len(plan.tech_md.splitlines())} lines")
+    for milestone in plan.milestones or [Milestone("(no milestone)")]:
+        issues = [i for i in plan.issues if (i.milestone or "(no milestone)") == milestone.title]
+        typer.secho(f"\n  {milestone.title}", bold=True)
+        for issue in issues:
+            labels = f"  [{', '.join(issue.labels)}]" if issue.labels else ""
+            decision = "  (needs your decision)" if issue.needs_human else ""
+            typer.echo(f"    - {issue.title}{labels}{decision}")
+    unassigned = [i for i in plan.issues if i.milestone is None] if plan.milestones else []
+    for issue in unassigned:
+        typer.echo(f"    - {issue.title}  (no milestone)")
+    typer.echo(f"\nFull plan (docs and issue bodies): {plan_file}")
+
 
 @app.command()
-def new(runtime: RuntimeOpt = None, model: ModelOpt = None) -> None:
-    """Project agent: interview you, create the repo + GitHub repo, run init, and open the starting issues."""
-    _not_implemented("new", runtime=runtime, model=model)
+def new(
+    idea: Annotated[Optional[str], typer.Argument(help="Your idea in a sentence, to start the interview.")] = None,
+    from_plan: Annotated[
+        Optional[Path], typer.Option("--from-plan", help="Skip the interview and create from a saved plan JSON file.")
+    ] = None,
+    directory: Annotated[Path, typer.Option("--dir", help="Where to create the project folder.")] = Path("."),
+    runtime: RuntimeOpt = None,
+    model: ModelOpt = None,
+    dry_run: DryRunOpt = False,
+    yes: YesOpt = False,
+) -> None:
+    """Project agent: interview you, plan PRODUCT.md/TECH.md and a backlog, then create the repo and issues."""
+    parent = directory.resolve()
+    try:
+        find_repo(parent)
+        typer.secho(f"Warning: {parent} is inside a git repo; the new project will be nested in it.", fg="yellow")
+        if not yes and not typer.confirm("Continue?", default=False):
+            raise typer.Exit(1)
+    except NotInRepoError:
+        pass
+
+    try:
+        if from_plan:
+            plan, plan_file = load_plan(from_plan), from_plan
+        else:
+            plan, plan_file = _plan_interactively(idea, parent, runtime, model)
+    except (Aborted, KeyboardInterrupt):
+        typer.echo("\nStopped. Nothing was created.")
+        raise typer.Exit(1)
+    except (ProjectError, ConfigError) as e:
+        _fail(str(e))
+    except RuntimeUnavailable as e:
+        _fail(f"runtime unavailable: {e}")
+
+    if dry_run:
+        if from_plan:  # the interactive path has already shown it
+            _show_plan(plan, plan_file)
+    elif not yes and not typer.confirm(
+        f"\nCreate {plan.repo_name} locally and on GitHub with {len(plan.issues)} issues?", default=True
+    ):
+        typer.echo(f"Not created. Resume later with: factory new --from-plan {plan_file}")
+        raise typer.Exit(1)
+
+    try:
+        slug = create_project(plan, parent, GitHub(), write_factory_dir, typer.echo, dry_run=dry_run)
+    except (ProjectError, GitHubError) as e:
+        _fail(f"{e}\nThe plan is saved; fix the problem and resume with: factory new --from-plan {plan_file}")
+    if slug:
+        typer.secho(f"\nDone: https://github.com/{slug}", fg="green")
+        typer.echo(f"Next: cd {parent / plan.repo_name} && factory status")
+
+
+def _plan_interactively(
+    idea: str | None, parent: Path, runtime: Runtime | None, model: str | None
+) -> tuple[ProjectPlan, Path]:
+    spec = load_agent(None, "project", FactoryConfig(), runtime.value if runtime else None, model)
+    agent = get_runtime(spec.runtime)
+    typer.secho("Project interview. Answer each question; type /done to wrap up early, /quit to stop.\n", dim=True)
+
+    def ask(question: str) -> str:
+        typer.secho(f"\n{question}", fg="cyan")
+        return typer.prompt("you", prompt_suffix="> ")
+
+    turns = asyncio.run(interview(agent, spec, parent, ask, idea))
+    typer.secho(f"\nSummary:\n{turns[-1].text}\n", fg="cyan")
+    typer.echo("Writing the plan...")
+    plan = asyncio.run(make_plan(agent, spec, parent, turns))
+    while True:
+        plan_file = parent / f"{plan.repo_name}.plan.json"
+        save_plan(plan, plan_file)
+        _show_plan(plan, plan_file)
+        choice = typer.prompt("\n[c]reate, [r]evise with feedback, or [q]uit (plan stays saved)", default="c")
+        while (choice := choice.strip().lower()) not in ("c", "r", "q"):
+            choice = typer.prompt(f"{choice!r} is not one of c, r, q. Choose", default="c")
+        if choice == "c":
+            return plan, plan_file
+        if choice == "q":
+            typer.echo(f"Saved. Edit it if you like, then: factory new --from-plan {plan_file}")
+            raise typer.Exit(0)
+        feedback = typer.prompt("What should change?")
+        typer.echo("Revising the plan...")
+        plan = asyncio.run(make_plan(agent, spec, parent, turns, previous=plan, feedback=feedback))
 
 
 @app.command()
-def init(force: Annotated[bool, typer.Option(help="Overwrite an existing config.yaml.")] = False) -> None:
-    """Add a .factory/ folder (config, agents, skills) to the current repo."""
+def init(
+    force: Annotated[bool, typer.Option(help="Overwrite an existing config.yaml.")] = False,
+    labels: Annotated[bool, typer.Option(help="Create the factory labels on the GitHub repo.")] = True,
+) -> None:
+    """Add .factory/ (project config + project-specific skills) to the current repo and create GitHub labels."""
     repo = _repo(require_factory=False)
-    fdir = repo.factory_dir
-    config = fdir / "config.yaml"
+    config = repo.factory_dir / "config.yaml"
     if config.exists() and not force:
         typer.secho(f"{config} already exists (use --force to overwrite).", fg="yellow")
         raise typer.Exit(1)
-    for sub in ("agents", "skills"):
-        (fdir / sub).mkdir(parents=True, exist_ok=True)
-    config.write_text(CONFIG_TEMPLATE)
-    (fdir / ".gitignore").write_text(GITIGNORE_TEMPLATE)
-    typer.secho(f"Initialized {fdir}", fg="green")
-    typer.echo("TODO: copy default agent/skill templates and create factory labels on GitHub.")
+    typer.secho(f"Initialized {write_factory_dir(repo.root)}", fg="green")
+    if labels and repo.slug:
+        try:
+            GitHub().ensure_labels(repo.slug)
+            typer.echo(f"Created factory labels on {repo.slug}")
+        except (GitHubError, FileNotFoundError) as e:
+            typer.secho(f"Couldn't create GitHub labels ({e}); run `factory init --force` later.", fg="yellow")
 
 
 DOCTOR_PROMPT = "Reply with exactly the word OK and nothing else."

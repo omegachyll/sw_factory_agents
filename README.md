@@ -6,9 +6,9 @@ GitHub issues: triage, spec, implement, review and fix. They learn from your PR 
 Inspired by Zach Lloyd's talk [*Self-improving software factories*](https://youtu.be/tUPPVhBBcoM). The talk's idea is that
 software engineering becomes *factory engineering*: you build the thing that builds the product.
 
-> **Status: early.** The CLI shell, `factory init`, `factory doctor` and the agent runtime layer work: agents can
-> run on the Claude Agent SDK, and on the Copilot SDK (experimental, see below). The agent commands themselves are
-> still stubs. See [TODO.md](TODO.md).
+> **Status: early.** `factory new` (the project agent), `factory init` and `factory doctor` work, and agents run on
+> the Claude Agent SDK and, experimentally, the Copilot SDK. The build-loop agents (`triage`, `spec`, `implement`,
+> `review`, `fix`) and `learn`/`stats` are still stubs. See [TODO.md](TODO.md).
 
 ## How it works
 
@@ -28,8 +28,9 @@ GitHub issue ─► triage ─► spec (you review) ─► implement ─► revi
   per agent in config or per run with `--runtime`. A useful setup is to build with one runtime and review with the
   other. **The Copilot runtime is experimental:** it's type-checked against the SDK and tested with a fake client,
   but hasn't yet been run end to end against a real Copilot subscription.
-- **The factory lives in the product repo.** Agents, skills and config are stored in `.factory/` and versioned with the
-  code, so every project ends up with a factory tuned to it.
+- **Two layers: the factory and the project.** The agents and their general skills ship with sw-factory, so improving
+  them improves every project. Each project's `.factory/` holds its config and *project-specific* skills, which are
+  added after the factory's and take precedence. See [Agents and skills](#agents-and-skills).
 
 ## Install
 
@@ -51,7 +52,8 @@ For development: `uv sync --all-extras`, then `uv run pytest` and `uv run pyrigh
 ## Usage
 
 ```bash
-factory new                       # project agent: interview → new repo + GitHub repo → .factory/ → starting issues
+factory new ["my idea"]           # project agent: interview → plan → new repo + GitHub repo → starting issues
+factory new --from-plan my-app.plan.json   # create from a saved (and optionally hand-edited) plan
 cd my-app
 factory init                      # add .factory/ to an existing repo
 factory doctor [--runtime ...]    # check setup: git, gh login, a test prompt on each runtime
@@ -73,17 +75,37 @@ pushed without doing it) and `--yes` (skip confirmation).
 Every command except `new` acts on the git repo containing the current directory. The GitHub repo is read from the
 `origin` remote.
 
-## Per-repo layout
+### Starting a project: `factory new`
+
+1. **Interview.** The project agent asks one question at a time: problem and users, v1 scope, non-goals, platform,
+   stack, data, auth, constraints, what "done" means, and the repo name. Answer `/done` to wrap up early or `/quit`
+   to stop.
+2. **Plan.** It writes PRODUCT.md, TECH.md and a backlog of small issues in build order, with acceptance criteria and
+   milestones. The plan is saved to `<repo>.plan.json` next to where you ran the command. You can **create** it,
+   **revise** it with feedback, or **quit** and hand-edit the JSON, then resume with `--from-plan`.
+3. **Create.** It makes the folder with README/PRODUCT/TECH and `.factory/`, commits, creates the GitHub repo
+   (private unless you chose public), pushes, creates the factory labels and milestones, and opens every issue
+   labelled `factory:new`. `--dry-run` shows all of this without doing any of it.
+
+## Agents and skills
 
 ```
-my-app/
-  .factory/
-    config.yaml        # default runtime/model, per-agent overrides + maturity level
-    agents/<agent>.md  # role prompt + frontmatter `access: read|write`
-    skills/<agent>/    # skill/context files, edited over time by `factory learn`
-    runs.db            # gitignored: run log + collected feedback
-../my-app.worktrees/   # one checkout per issue the agents work in
+sw-factory (shared by every project)          my-app/.factory/ (this project only)
+  src/sw_factory/prompts/                       config.yaml          runtime, model, maturity level per agent
+    agents/<agent>.md   base role prompt        skills/<agent>/*.md  project-specific lessons (win over general)
+    skills/<agent>/*.md general skills          agents/<agent>.md    optional: replace the base prompt here
+                                                runs.db              gitignored: run log + feedback
+my-app.worktrees/  (next to the repo)          one checkout per issue the agents work in
 ```
+
+An agent's prompt is its base prompt, then the factory's skills for it, then the project's skills for it. The
+`agents/<agent>.md` frontmatter sets its access: `none` (conversation only), `read` (read and search files) or
+`write` (also edit files and run commands).
+
+Lessons go to one of the two layers. A general lesson ("keep PRs small") becomes a PR on sw-factory and reaches every
+project. A project lesson ("this app uses pnpm") becomes a PR on that project's `.factory/skills/`. Because a change to
+the shared layer reaches every project at once, each agent output records which factory version produced it, so
+regressions show up in `factory stats`.
 
 ## Feedback the agents learn from
 
@@ -96,9 +118,10 @@ The signals, ordered from strongest to weakest:
 5. Your answers to agent questions on issues
 
 Everything an agent produces carries a hidden footer, for example
-`<!-- factory: agent=implement run=42 skills=<sha> -->`, so feedback can be traced back to the agent and the skill
-version that produced it. Start a comment with `rule:` to mark it as a general lesson rather than a fix for that
-one PR.
+`<!-- factory: agent=implement run=42 factory=<sha> project-skills=<sha> -->`, so feedback can be traced back to the
+agent and the skill versions that produced it. Start a comment with `rule:` to mark a general lesson for the factory,
+or `rule(project):` for a lesson that only applies to this project. Comments without either are treated as fixes for
+that one PR.
 
 ## Maturity ladder (per agent)
 
@@ -115,7 +138,10 @@ one PR.
 src/sw_factory/
   cli.py       # Typer app and commands
   repo.py      # find the repo root + GitHub owner/name from the working directory
-  config.py    # load .factory/config.yaml + agents/<name>.md into an AgentSpec
+  config.py    # compose an agent from factory prompts/skills + project config/skills
+  project.py   # project agent: interview, plan, create repo/labels/milestones/issues
+  github.py    # thin `gh` wrapper; factory labels
+  prompts/     # the shared layer: agents/<agent>.md and skills/<agent>/*.md
   runtimes/
     base.py    # AgentSpec / AgentResult / AgentRuntime: the runtime-neutral interface
     claude.py  # Claude Agent SDK adapter

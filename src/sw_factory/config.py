@@ -1,4 +1,10 @@
-"""Load .factory/config.yaml and .factory/agents/<name>.md into an AgentSpec.
+"""Build an AgentSpec from the factory's shared agents/skills plus the project's own config and skills.
+
+Two layers:
+- Factory (ships with sw-factory, shared by every project): prompts/agents/<name>.md and prompts/skills/<name>/*.md.
+  Improving these improves every project.
+- Project (.factory/ in the repo): config.yaml, skills/<name>/*.md (project-specific lessons, applied after the
+  factory's so they win), and optionally agents/<name>.md to replace the factory's base prompt entirely.
 
 Precedence for runtime/model: CLI option > config.yaml `agents.<name>` > config.yaml defaults.
 """
@@ -6,6 +12,8 @@ Precedence for runtime/model: CLI option > config.yaml `agents.<name>` > config.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from importlib.resources import files
+from pathlib import Path
 from typing import Any
 
 import yaml
@@ -14,7 +22,7 @@ from sw_factory.repo import RepoContext
 from sw_factory.runtimes import RUNTIMES, AgentSpec
 
 LEVELS = ("L0", "L1", "L2", "L3")
-ACCESS = ("read", "write")
+ACCESS = ("none", "read", "write")
 
 
 class ConfigError(Exception):
@@ -101,17 +109,46 @@ def parse_agent_file(text: str, source: str) -> tuple[dict[str, Any], str]:
     return meta, parts[2].strip()
 
 
+FACTORY_PROMPTS = Path(str(files("sw_factory") / "prompts"))
+
+
+def _skill_files(directory: Path) -> list[Path]:
+    return sorted(directory.glob("*.md")) if directory.is_dir() else []
+
+
+def _skills_section(title: str, paths: list[Path]) -> str:
+    return "\n\n".join([f"# {title}"] + [f"## {p.stem}\n\n{p.read_text().strip()}" for p in paths])
+
+
 def load_agent(
-    repo: RepoContext, name: str, config: FactoryConfig, runtime: str | None = None, model: str | None = None
+    repo: RepoContext | None,
+    name: str,
+    config: FactoryConfig,
+    runtime: str | None = None,
+    model: str | None = None,
+    factory_prompts: Path = FACTORY_PROMPTS,
 ) -> AgentSpec:
-    path = repo.factory_dir / "agents" / f"{name}.md"
-    if not path.exists():
-        raise ConfigError(f"no agent definition at {path}")
-    meta, prompt = parse_agent_file(path.read_text(), str(path))
+    """Compose an agent: base prompt (project override or factory) + factory skills + project skills."""
+    override = repo.factory_dir / "agents" / f"{name}.md" if repo else None
+    base = override if override and override.exists() else factory_prompts / "agents" / f"{name}.md"
+    if not base.exists():
+        raise ConfigError(f"unknown agent {name!r}: no {base}")
+    meta, prompt = parse_agent_file(base.read_text(), str(base))
     if not prompt:
-        raise ConfigError(f"{path}: prompt is empty")
+        raise ConfigError(f"{base}: prompt is empty")
     access = meta.get("access", "read")
     if access not in ACCESS:
-        raise ConfigError(f"{path}: access must be one of {', '.join(ACCESS)}, got {access!r}")
+        raise ConfigError(f"{base}: access must be one of {', '.join(ACCESS)}, got {access!r}")
+
+    sections = [prompt]
+    if factory_skills := _skill_files(factory_prompts / "skills" / name):
+        sections.append(_skills_section("Skills", factory_skills))
+    if repo and (project_skills := _skill_files(repo.factory_dir / "skills" / name)):
+        sections.append(_skills_section(
+            "Project-specific skills (these take precedence over the general skills above)", project_skills
+        ))
+
     resolved_runtime, resolved_model = config.resolve(name, runtime, model)
-    return AgentSpec(name=name, system_prompt=prompt, runtime=resolved_runtime, model=resolved_model, access=access)
+    return AgentSpec(
+        name=name, system_prompt="\n\n".join(sections), runtime=resolved_runtime, model=resolved_model, access=access
+    )
