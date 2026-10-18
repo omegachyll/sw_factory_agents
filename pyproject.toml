@@ -1,0 +1,22 @@
+[project]
+name = "sw-factory"
+version = "0.1.0"
+description = "A self-improving software factory: AI agents that triage, spec, implement and review GitHub issues in the repo you run it from."
+readme = "README.md"
+license = "PolyForm-Noncommercial-1.0.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Ajay Gowda" }]
+requires-python = ">=3.11"
+dependencies = [
+    "typer>=0.12",
+]
+
+[project.scripts]
+factory = "sw_factory.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sw_factory"]
