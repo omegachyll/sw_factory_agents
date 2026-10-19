@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import shutil
 import subprocess
 from enum import Enum
@@ -27,7 +28,22 @@ from sw_factory.project import (
     make_plan,
     save_plan,
 )
+from sw_factory.project import Turn
 from sw_factory.repo import FACTORY_DIR, NotInRepoError, RepoContext, find_repo
+from sw_factory.revise import (
+    ACTION_LABELS,
+    MAX_ROUNDS,
+    Action,
+    Proposal,
+    ReviseError,
+    apply_proposal,
+    ask_agent,
+    build_prompt,
+    doc_diff,
+    plan_actions,
+    push_docs_branch,
+    read_remote_docs,
+)
 from sw_factory.runtimes import RUNTIMES, AgentResult, AgentSpec, RuntimeUnavailable, get_runtime
 from sw_factory.triage import (
     STAGES,
@@ -295,6 +311,156 @@ def _plan_interactively(
         feedback = typer.prompt("What should change?")
         typer.echo("Revising the plan...")
         plan = asyncio.run(make_plan(agent, spec, parent, turns, previous=plan, feedback=feedback))
+
+
+@app.command("project")
+def project_cmd(
+    suggestions: Annotated[Optional[str], typer.Argument(help="What you'd like to change, in your own words.")] = None,
+    runtime: RuntimeOpt = None,
+    model: ModelOpt = None,
+    dry_run: DryRunOpt = False,
+    yes: YesOpt = False,
+) -> None:
+    """Project agent: revise PRODUCT.md, TECH.md and the open backlog of this repo from your suggestions."""
+    repo = _repo()
+    if not repo.slug:
+        _fail("this repo has no GitHub origin remote")
+    github = GitHub()
+    try:
+        base = github.default_branch(repo.slug)
+        docs = read_remote_docs(repo.root, base)
+        issues = github.list_issues(repo.slug)
+        milestones = github.milestones(repo.slug)
+    except (GitHubError, ReviseError) as e:
+        _fail(str(e))
+    open_issues = {i.number: i for i in issues if i.state == "open"}
+    typer.secho(f"Docs from origin/{base}; {len(open_issues)} open and {len(issues) - len(open_issues)} closed issues.",
+                dim=True)
+
+    config = _config(repo)
+    runtime_name, model_id = _model_for("project", runtime, model, config, repo.root)
+    spec = load_agent(repo, "project", config, runtime_name, model_id)
+    agent = get_runtime(spec.runtime)
+    runs: list[AgentResult] = []
+
+    def ask(prompt: str) -> list[str] | Proposal:
+        typer.secho("Thinking...", dim=True)
+        return asyncio.run(ask_agent(agent, spec, repo.root, prompt, open_issues, milestones, runs))
+
+    try:
+        turns = [Turn("person", suggestions or typer.prompt("What would you like to change?"))]
+        proposal: Proposal | None = None
+        for round_ in range(MAX_ROUNDS + 1):
+            reply = ask(build_prompt(docs, issues, milestones, turns, force_proposal=round_ == MAX_ROUNDS))
+            if isinstance(reply, Proposal):
+                proposal = reply
+                break
+            turns.append(Turn("agent", "\n".join(reply)))
+            turns.append(Turn("person", _answer_questions(reply)))
+        if proposal is None:
+            _fail("the project agent kept asking questions instead of proposing changes")
+
+        while True:
+            actions = plan_actions(proposal, open_issues)
+            _show_proposal(proposal, actions, docs)
+            typer.secho(_usage(runs), dim=True)
+            if proposal.empty:
+                typer.echo("Nothing to change.")
+                return
+            if dry_run:
+                typer.secho("[dry-run] nothing was changed", fg="yellow")
+                return
+            choice = "a" if yes else typer.prompt("\n[a]pply, [r]evise with feedback, or [q]uit", default="a")
+            while (choice := choice.strip().lower()) not in ("a", "r", "q"):
+                choice = typer.prompt(f"{choice!r} is not one of a, r, q. Choose", default="a")
+            if choice == "q":
+                typer.echo("Nothing was changed.")
+                raise typer.Exit(1)
+            if choice == "a":
+                break
+            feedback = typer.prompt("What should change?")
+            reply = ask(build_prompt(docs, issues, milestones, turns, previous=proposal, feedback=feedback))
+            if not isinstance(reply, Proposal):
+                _fail("the project agent asked questions instead of revising:\n" + "\n".join(reply))
+            proposal = reply
+    except (Aborted, KeyboardInterrupt):
+        typer.echo("\nStopped. Nothing was changed.")
+        raise typer.Exit(1)
+    except ReviseError as e:
+        _fail(str(e))
+    except RuntimeUnavailable as e:
+        _fail(f"runtime unavailable: {e}")
+
+    run_id = new_run_id()
+    footer = make_footer(agent="project", run=run_id, factory=factory_version(), model=model_id)
+    try:
+        pr_url = None
+        if proposal.docs:
+            branch = f"factory/project-{run_id}"
+            changed = " and ".join(proposal.docs)
+            push_docs_branch(repo.root, proposal.docs, branch, f"Revise {changed}\n\n{proposal.summary}", base)
+            pr_url = github.create_pr(
+                repo.slug, head=branch, base=base, title=f"Revise {changed}",
+                body=_pr_body(proposal, actions, footer),
+            )
+            typer.secho(f"Opened {pr_url}", fg="green")
+        apply_proposal(proposal, actions, repo.slug, github, pr_url, issues, footer, typer.echo)
+    except (GitHubError, ReviseError) as e:
+        _fail(f"{e}\nSome changes may already be applied; check the repo's issues and PRs.")
+    if pr_url:
+        typer.echo("Merge the PR soon: triage reads the docs from your checkout, so it sees the old plan until then.")
+
+
+def _answer_questions(questions: list[str]) -> str:
+    typer.secho("\nThe project agent has some questions. Type /done to let it decide, /quit to stop.", dim=True)
+    answers = []
+    for n, question in enumerate(questions, 1):
+        typer.secho(f"\n{n}. {question}", fg="cyan")
+        answer = typer.prompt("you", prompt_suffix="> ").strip()
+        if answer == "/quit":
+            raise Aborted()
+        if answer == "/done":
+            answers.append("Use your recommended answers for the remaining questions.")
+            break
+        answers.append(f"{n}. {answer}")
+    return "\n".join(answers)
+
+
+def _show_proposal(proposal: Proposal, actions: list[Action], docs: dict[str, str | None]) -> None:
+    typer.secho("\nProposed changes", bold=True)
+    typer.echo(f"  {proposal.summary}")
+    for name, text in proposal.docs.items():
+        typer.secho(f"\n{name}", bold=True)
+        for line in doc_diff(name, docs.get(name), text).splitlines()[2:]:
+            color = {"+": "green", "-": "red", "@": "cyan"}.get(line[:1])
+            typer.secho(line, fg=color)
+    if actions or proposal.new_issues or proposal.milestones:
+        typer.secho("\nBacklog", bold=True)
+    for m in proposal.milestones:
+        typer.echo(f"  new milestone {m.title!r}")
+    for action in actions:
+        typer.echo(f"  #{action.issue.number} {action.issue.title}: {ACTION_LABELS[action.kind]}")
+        typer.secho(f"      {action.change.reason}", dim=True)
+        if action.change.title and action.change.title != action.issue.title:
+            typer.secho(f"      title -> {action.change.title}", fg="green")
+        if action.change.body is not None and action.kind != "close":
+            old_body = re.sub(r"\s*<!-- factory: [^>]*-->\s*$", "", action.issue.body)
+            for line in doc_diff(f"#{action.issue.number}", old_body, action.change.body).splitlines()[2:]:
+                color = {"+": "green", "-": "red", "@": "cyan"}.get(line[:1])
+                typer.secho(f"      {line}", fg=color)
+    for issue in proposal.new_issues:
+        decision = "  (needs your decision)" if issue.needs_human else ""
+        typer.echo(f"  new issue: {issue.title}{f'  [{issue.milestone}]' if issue.milestone else ''}{decision}")
+
+
+def _pr_body(proposal: Proposal, actions: list[Action], footer: str) -> str:
+    lines = [proposal.summary]
+    if actions or proposal.new_issues:
+        lines.append("\n**Backlog changes**")
+        lines += [f"- #{a.issue.number}: {ACTION_LABELS[a.kind]}. {a.change.reason}" for a in actions]
+        lines += [f"- New issue: {i.title}" for i in proposal.new_issues]
+    lines.append(f"\nOpened by `factory project`.\n\n{footer}")
+    return "\n".join(lines)
 
 
 @app.command()

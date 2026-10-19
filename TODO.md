@@ -43,6 +43,10 @@ Build order: the factory grows alongside the first real project. Do a step by ha
 - [x] Used for real on hydro-monitor: 14 issues, 4 milestones, labels; all created as planned
 - [x] `Depends on: <title>` lines become `#N` issue links; issues needing a decision get `factory:needs-human`
 - [ ] Capture further corrections from real use as the project agent's first skills
+- [x] `factory project`: revise PRODUCT.md/TECH.md + open backlog from suggestions; questions on conflicts;
+      docs via PR from a temp worktree; per-stage issue rules (edit / re-triage / flag / close); live dry run on
+      hydro-monitor (30 s interval + temperature compensation: good diff, #13 superseded, $0.39 on Opus)
+- [ ] Use `factory project` for real on hydro-monitor
 - [ ] Interview answers are single-line; consider multi-line input (e.g. open `$EDITOR`) for long answers
 
 ## Model selection

@@ -6,7 +6,7 @@ GitHub issues: triage, spec, implement, review and fix. They learn from your PR 
 Inspired by Zach Lloyd's talk [*Self-improving software factories*](https://youtu.be/tUPPVhBBcoM). The talk's idea is that
 software engineering becomes *factory engineering*: you build the thing that builds the product.
 
-> **Status: early.** `factory new` (the project agent), `factory triage`, `factory init`, `factory models` and
+> **Status: early.** `factory new` and `factory project` (the project agent), `factory triage`, `factory init`, `factory models` and
 > `factory doctor` work, and agents run on the Claude Agent SDK and, experimentally, the Copilot SDK. The other
 > build-loop agents (`spec`, `implement`, `review`, `fix`) and `learn`/`stats` are still stubs. See [TODO.md](TODO.md).
 
@@ -56,6 +56,7 @@ factory new ["my idea"]           # project agent: interview → plan → new re
 factory new --from-plan my-app.plan.json   # create from a saved (and optionally hand-edited) plan
 cd my-app
 factory init                      # add .factory/ to an existing repo
+factory project ["suggestions"]   # project agent: revise PRODUCT.md, TECH.md and the open backlog
 factory doctor [--runtime ...]    # check setup: git, gh login, a test prompt on each runtime
 factory status                    # issues/PRs by stage, agent maturity levels
 factory models [--runtime ...]    # models per runtime (with aliases) and which model each agent uses
@@ -90,6 +91,23 @@ comments, PRODUCT.md/TECH.md and the repository (read-only).
 - You see the comment first; it's posted (and the stage label set) only when you confirm. `--dry-run` posts nothing.
 - To correct it, reply on the issue and run triage again. It reads your reply, revises, and edits its own comment
   in place, or posts a new one if there are replies after it.
+
+### Changing the plan: `factory project`
+
+Tell the project agent what you'd like to change, in your own words. It asks follow-up questions when something is
+ambiguous or conflicts with an earlier decision (in the docs or in an issue comment), then proposes doc changes as a
+diff and backlog changes issue by issue. You apply, revise with feedback, or quit; `--dry-run` changes nothing.
+
+On apply, the doc changes go to a PR (made in a temporary worktree, so your checkout isn't touched) and each issue
+change is applied according to the issue's stage:
+
+| Issue | What happens |
+|---|---|
+| Not started | Body updated, with a comment explaining why |
+| Triaged (`factory:ready`) | Body updated and moved back to `factory:new`: its build plan is out of date |
+| In progress / in review | Not edited. Flagged `factory:needs-human` with the proposed change, for you to decide |
+| No longer needed | Closed as superseded, with a comment |
+| Closed (already built) | Never touched; changes to built code become new issues |
 
 ### Starting a project: `factory new`
 

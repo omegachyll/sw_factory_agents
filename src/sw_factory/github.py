@@ -46,6 +46,7 @@ class IssueData:
     labels: list[str]
     is_pull_request: bool = False
     comments: list[Comment] = field(default_factory=list)
+    milestone: str | None = None
 
 
 Runner = Callable[[Sequence[str], Path | None], str]
@@ -106,6 +107,7 @@ class GitHub:
         issue = IssueData(
             number=data["number"], title=data["title"], body=data.get("body") or "", state=data["state"],
             labels=[label["name"] for label in data.get("labels", [])], is_pull_request="pull_request" in data,
+            milestone=(data.get("milestone") or {}).get("title"),
         )
         if with_comments:
             lines = self.runner(
@@ -137,3 +139,48 @@ class GitHub:
             if label.startswith("factory:") and label != stage:
                 args += ["--remove-label", label]
         self.runner(args, None)
+
+    def list_issues(self, slug: str, state: str = "all") -> list[IssueData]:
+        """Issues (not PRs) with labels, milestone and comments. Comment ids aren't included in this listing."""
+        raw = self.runner(
+            ["issue", "list", "-R", slug, "--state", state, "--limit", "500",
+             "--json", "number,title,body,state,labels,milestone,comments"], None
+        )
+        return [
+            IssueData(
+                number=i["number"], title=i["title"], body=i.get("body") or "", state=i["state"].lower(),
+                labels=[label["name"] for label in i.get("labels", [])],
+                milestone=(i.get("milestone") or {}).get("title"),
+                comments=[Comment(0, (c.get("author") or {}).get("login", ""), c.get("body", ""), c.get("createdAt", ""))
+                          for c in i.get("comments", [])],
+            )
+            for i in sorted(json.loads(raw or "[]"), key=lambda i: i["number"])
+        ]
+
+    def milestones(self, slug: str) -> list[str]:
+        out = self.runner(["api", f"repos/{slug}/milestones?state=all", "--jq", ".[].title"], None)
+        return [line for line in out.splitlines() if line]
+
+    def edit_issue(
+        self, slug: str, number: int, *, title: str | None = None, body: str | None = None, milestone: str | None = None
+    ) -> None:
+        args = ["issue", "edit", str(number), "-R", slug]
+        if title:
+            args += ["--title", title]
+        if body is not None:
+            args += ["--body", body]
+        if milestone:
+            args += ["--milestone", milestone]
+        self.runner(args, None)
+
+    def close_issue(self, slug: str, number: int, comment: str) -> None:
+        self.runner(["issue", "close", str(number), "-R", slug, "--reason", "not planned", "--comment", comment], None)
+
+    def default_branch(self, slug: str) -> str:
+        return self.runner(["repo", "view", slug, "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"], None)
+
+    def create_pr(self, slug: str, *, head: str, base: str, title: str, body: str) -> str:
+        """Open a pull request and return its URL."""
+        return self.runner(
+            ["pr", "create", "-R", slug, "--head", head, "--base", base, "--title", title, "--body", body], None
+        )
